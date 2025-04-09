@@ -112,12 +112,30 @@ architecture arch_imp of full_radio_v1_0_S00_AXI is
 	signal slv_reg0	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
 	signal slv_reg1	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
 	signal slv_reg2	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
-	signal slv_reg3	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
+	signal slv_reg3	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0) := (others => '0');
 	signal slv_reg_rden	: std_logic;
 	signal slv_reg_wren	: std_logic;
 	signal reg_data_out	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
 	signal byte_index	: integer;
 	signal aw_en	: std_logic;
+	
+	signal adc_data : std_logic_vector(15 downto 0);
+	signal dds_tune : std_logic_vector(31 downto 0);
+	signal output_i : std_logic_vector(31 downto 0);
+	signal output_q : std_logic_vector(31 downto 0);
+	signal adc_tvalid	: std_logic;
+	signal tune_tvalid	: std_logic;
+	signal filter_ready1	: std_logic;
+	signal filter_ready2	: std_logic;
+	signal f1_tvalidL	: std_logic;
+	signal f3_tvalidR	: std_logic;
+	signal filter_1_out_q : std_logic_vector(23 downto 0);
+	signal filter_2_out_i : std_logic_vector(23 downto 0);
+	signal filter_out_L : std_logic_vector(23 downto 0);
+	signal filter_out_R : std_logic_vector(23 downto 0);
+	signal rst_reg3 : std_logic;
+	signal counter : natural := 0;
+	
 
 COMPONENT dds_compiler_0
   PORT (
@@ -126,9 +144,42 @@ COMPONENT dds_compiler_0
     s_axis_phase_tvalid : IN STD_LOGIC;
     s_axis_phase_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
     m_axis_data_tvalid : OUT STD_LOGIC;
-    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(15 DOWNTO 0)
   );
     END COMPONENT;
+    
+COMPONENT dds_compiler_1
+  PORT (
+    aclk : IN STD_LOGIC;
+    aresetn : IN STD_LOGIC;
+    s_axis_phase_tvalid : IN STD_LOGIC;
+    s_axis_phase_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0) 
+  );
+END COMPONENT;
+    
+ COMPONENT fir_compiler_0
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_data_tvalid : IN STD_LOGIC;
+    s_axis_data_tready : OUT STD_LOGIC;
+    s_axis_data_tdata : IN STD_LOGIC_VECTOR(15 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(23 DOWNTO 0) 
+  );
+END COMPONENT;
+
+COMPONENT fir_compiler_1
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_data_tvalid : IN STD_LOGIC;
+    s_axis_data_tready : OUT STD_LOGIC;
+    s_axis_data_tdata : IN STD_LOGIC_VECTOR(15 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(23 DOWNTO 0) 
+  );
+END COMPONENT;
 
 begin
 	-- I/O Connections assignments
@@ -152,7 +203,9 @@ begin
 	    if S_AXI_ARESETN = '0' then
 	      axi_awready <= '0';
 	      aw_en <= '1';
+	      counter <= 0;
 	    else
+	      counter <= counter + 1;  -- counter
 	      if (axi_awready = '0' and S_AXI_AWVALID = '1' and S_AXI_WVALID = '1' and aw_en = '1') then
 	        -- slave is ready to accept write address when
 	        -- there is a valid write address and write data
@@ -221,10 +274,13 @@ begin
 	-- and the slave is ready to accept the write address and write data.
 	slv_reg_wren <= axi_wready and S_AXI_WVALID and axi_awready and S_AXI_AWVALID ;
 
-	process (S_AXI_ACLK)
+	process (S_AXI_ACLK, slv_reg3)
 	variable loc_addr :std_logic_vector(OPT_MEM_ADDR_BITS downto 0); 
 	begin
 	  if rising_edge(S_AXI_ACLK) then 
+--	    if (slv_reg3(0) = '1') then
+--	      S_AXI_ARESETN <= '0';
+--	    end if;
 	    if S_AXI_ARESETN = '0' then
 	      slv_reg0 <= (others => '0');
 	      slv_reg1 <= (others => '0');
@@ -258,14 +314,15 @@ begin
 	                slv_reg2(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
 	              end if;
 	            end loop;
-	          when b"11" =>
-	            for byte_index in 0 to (C_S_AXI_DATA_WIDTH/8-1) loop
-	              if ( S_AXI_WSTRB(byte_index) = '1' ) then
-	                -- Respective byte enables are asserted as per write strobes                   
-	                -- slave registor 3
-	                slv_reg3(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
-	              end if;
-	            end loop;
+--	          when b"11" =>
+--	            for byte_index in 0 to (C_S_AXI_DATA_WIDTH/8-1) loop
+--	              if ( S_AXI_WSTRB(byte_index) = '1' ) then
+--	                -- Respective byte enables are asserted as per write strobes                   
+--	                -- slave registor 3
+----	                slv_reg3(byte_index*8+7 downto byte_index*8) <= S_AXI_WDATA(byte_index*8+7 downto byte_index*8);
+--	                slv_reg3(byte_index*8) <= S_AXI_WDATA(byte_index*8);
+--	              end if;
+--	            end loop;
 	          when others =>
 	            slv_reg0 <= slv_reg0;
 	            slv_reg1 <= slv_reg1;
@@ -358,7 +415,7 @@ begin
 	-- and the slave is ready to accept the read address.
 	slv_reg_rden <= axi_arready and S_AXI_ARVALID and (not axi_rvalid) ;
 
-	process (slv_reg0, slv_reg1, slv_reg2, slv_reg3, axi_araddr, S_AXI_ARESETN, slv_reg_rden)
+	process (slv_reg0, slv_reg1, slv_reg2, counter, axi_araddr, S_AXI_ARESETN, slv_reg_rden)
 	variable loc_addr :std_logic_vector(OPT_MEM_ADDR_BITS downto 0);
 	begin
 	    -- Address decoding for reading registers
@@ -367,11 +424,11 @@ begin
 	      when b"00" =>
 	        reg_data_out <= slv_reg0;
 	      when b"01" =>
-	        reg_data_out <= x"DEADBEEF";
+	        reg_data_out <= slv_reg1;
 	      when b"10" =>
 	        reg_data_out <= slv_reg2;
 	      when b"11" =>
-	        reg_data_out <= slv_reg3;
+	        reg_data_out <= std_logic_vector(to_unsigned(counter, C_S_AXI_DATA_WIDTH));
 	      when others =>
 	        reg_data_out  <= (others => '0');
 	    end case;
@@ -381,8 +438,11 @@ begin
 	process( S_AXI_ACLK ) is
 	begin
 	  if (rising_edge (S_AXI_ACLK)) then
+--	    slv_reg3 <= std_logic_vector(signed(slv_reg3) + 1);  -- add to counter?
+	    
 	    if ( S_AXI_ARESETN = '0' ) then
 	      axi_rdata  <= (others => '0');
+--	      slv_reg2(0) <= '1';  -- set register to 1 if the reset is pressed
 	    else
 	      if (slv_reg_rden = '1') then
 	        -- When there is a valid read address (S_AXI_ARVALID) with 
@@ -397,18 +457,85 @@ begin
 
 
 	-- Add user logic here
+	-- implment reset to DDS
+	rst_reg3 <= not slv_reg2(0);
+	
 
-your_instance_name : dds_compiler_0
+fake_adc_dds : dds_compiler_0
   PORT MAP (
     aclk => s_axi_aclk,
-    aresetn => '1',
+    aresetn => rst_reg3,
     s_axis_phase_tvalid => '1',
-    s_axis_phase_tdata => slv_reg0,
-    m_axis_data_tvalid => m_axis_tvalid,
-    m_axis_data_tdata => m_axis_tdata
+    s_axis_phase_tdata => slv_reg0,  -- register to set fake adc phase increment
+    m_axis_data_tvalid => adc_tvalid,
+    m_axis_data_tdata => adc_data
   );
 
+tuner_dds : dds_compiler_1
+  PORT MAP (
+    aclk => s_axi_aclk,
+    aresetn => rst_reg3,
+    s_axis_phase_tvalid => '1',
+    s_axis_phase_tdata => slv_reg1,  -- register to set tuner phase increment
+    m_axis_data_tvalid => tune_tvalid,
+    m_axis_data_tdata => dds_tune  -- change one of these variables?>
+  );
+  
+  -- mixer multiplication here
+  output_i <= std_logic_vector(signed(dds_tune(15 downto 0)) * signed(adc_data));
+  output_q <= std_logic_vector(signed(dds_tune(31 downto 16)) * signed(adc_data));
+  
+  -- filter 1 L
 
+  filter_1L : fir_compiler_0
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => '1',
+    s_axis_data_tready => open,
+    s_axis_data_tdata => output_q(31 downto 16),  -- data coming in from the mixer LEFT
+    m_axis_data_tvalid => f1_tvalidL,
+    m_axis_data_tdata => filter_1_out_q  -- chop off first bit and send to the next filter
+  );  
+  
+  
+  -- filter 2 L
+  filter_2L : fir_compiler_1
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => f1_tvalidL,
+    s_axis_data_tready => open,  -- output
+    s_axis_data_tdata => filter_1_out_q(15 downto 0),
+    m_axis_data_tvalid => filter_ready1,
+    m_axis_data_tdata => filter_out_L  -- output to the DAC if filter on LEFT
+  );
+ 
+  
+  -- filter 3 R
+
+  filter_1R : fir_compiler_0
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => '1',
+    s_axis_data_tready => open,  -- output
+    s_axis_data_tdata => output_i(31 downto 16),  -- data coming in from the mixer RIGHT
+    m_axis_data_tvalid => f3_tvalidR,
+    m_axis_data_tdata => filter_2_out_i  -- chop off first bit and send to the next filter
+  );  
+  
+  
+  -- filter 4 R
+  filter_2R : fir_compiler_1
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => f3_tvalidR,
+    s_axis_data_tready => open,  -- output
+    s_axis_data_tdata => filter_2_out_i(15 downto 0),
+    m_axis_data_tvalid => filter_ready2,
+    m_axis_data_tdata => filter_out_R  -- output to the DAC if filter on RIGHT
+  );
+  
+  m_axis_tdata <= filter_out_L(15 downto 0) & filter_out_R(15 downto 0);
+  m_axis_tvalid <= filter_ready2;
 	-- User logic ends
 
 end arch_imp;
